@@ -10,11 +10,11 @@ import (
 
 	"github.com/mdp/qrterminal/v3"
 	"go.mau.fi/whatsmeow"
+	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
-	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"google.golang.org/protobuf/proto"
 	_ "modernc.org/sqlite"
 )
@@ -96,7 +96,7 @@ func main() {
 	}
 
 	// After successful connection, you can send messages
-	phoneNumber := "201065391656"
+	phoneNumber := "201021347532"
 	message := "Hello from Go!"
 
 	err = sendMessage(client, phoneNumber, message)
