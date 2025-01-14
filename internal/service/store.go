@@ -3,8 +3,19 @@ package service
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
 
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	waLog "go.mau.fi/whatsmeow/util/log"
 	_ "modernc.org/sqlite"
+)
+
+var (
+	storeOnce sync.Once
+	store     *sqlstore.Container
+	storeMu   sync.Mutex
 )
 
 // CustomStore implements a SQLite store with foreign keys enabled
@@ -25,14 +36,12 @@ func NewCustomStore(path string) (*CustomStore, error) {
 		return nil, fmt.Errorf("failed to enable foreign keys: %v", err)
 	}
 
-	// Enable WAL mode
-	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
+	// Set pragmas for better concurrency
+	if _, err := db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to enable WAL mode: %v", err)
+		return nil, fmt.Errorf("failed to set synchronous mode: %v", err)
 	}
-
-	// Set busy timeout
-	if _, err := db.Exec("PRAGMA busy_timeout = 10000"); err != nil {
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to set busy timeout: %v", err)
 	}
@@ -63,4 +72,51 @@ func (s *CustomStore) Begin() (*sql.Tx, error) {
 // Close implements the sqlstore.Queryer interface
 func (s *CustomStore) Close() error {
 	return s.DB.Close()
+}
+
+// InitStore initializes the WhatsApp store
+func InitStore(dataDir string) (*sqlstore.Container, error) {
+	var err error
+	storeOnce.Do(func() {
+		// Ensure data directory exists
+		if err = os.MkdirAll(dataDir, 0755); err != nil {
+			return
+		}
+
+		dbPath := filepath.Join(dataDir, "whatsapp.db")
+		
+		// Open SQLite database with WAL mode and busy timeout
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			return
+		}
+
+		// Set pragmas for better concurrency
+		if _, err = db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			return
+		}
+		if _, err = db.Exec("PRAGMA synchronous=NORMAL"); err != nil {
+			return
+		}
+		if _, err = db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+			return
+		}
+
+		// Create container
+		store = sqlstore.NewWithDB(db, "whatsapp", waLog.Stdout("database", "DEBUG", true))
+		
+		// Initialize tables
+		if err = store.Upgrade(); err != nil {
+			return
+		}
+	})
+
+	return store, err
+}
+
+// GetStore returns the WhatsApp store instance
+func GetStore() *sqlstore.Container {
+	storeMu.Lock()
+	defer storeMu.Unlock()
+	return store
 }

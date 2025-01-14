@@ -31,6 +31,7 @@ type ClientConfig struct {
 
 // Message represents a WhatsApp message
 type Message struct {
-	Sender  string
-	Content string
+	Sender  string `json:"sender"`
+	Content string `json:"content"`
+	Type    string `json:"type"`
 }

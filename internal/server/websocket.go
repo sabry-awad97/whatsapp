@@ -25,6 +25,8 @@ type Message struct {
 	Recipient string `json:"recipient,omitempty"`
 	Content   string `json:"content,omitempty"`
 	Sender    string `json:"sender,omitempty"`
+	MsgType   string `json:"message_type,omitempty"`
+	Success   bool   `json:"success,omitempty"`
 }
 
 func NewWebSocketServer(whatsapp domain.Client) *WebSocketServer {
@@ -101,6 +103,7 @@ func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 			Type:    "message",
 			Sender:  msg.Sender,
 			Content: msg.Content,
+			MsgType: msg.Type,
 		}
 		if err := conn.WriteJSON(response); err != nil {
 			if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
@@ -125,9 +128,7 @@ func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 		log.Println("WhatsApp connection established")
 
 		// Send connected message
-		conn.WriteJSON(Message{
-			Type: "connected",
-		})
+		conn.WriteJSON(Message{Type: "connected"})
 	}()
 
 	// Handle QR codes
@@ -165,8 +166,8 @@ func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 	for {
 		var msg Message
 		if err := conn.ReadJSON(&msg); err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("Unexpected close error: %v", err)
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("WebSocket error: %v", err)
 			}
 			break
 		}
@@ -174,20 +175,38 @@ func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		switch msg.Type {
-		case "message":
-			if err := s.whatsapp.SendMessage(msg.Recipient, msg.Content); err != nil {
-				log.Printf("Failed to send message: %v", err)
-				conn.WriteJSON(Message{
-					Type:    "error",
-					Content: fmt.Sprintf("Failed to send message: %v", err),
-				})
+		case "send_message":
+			if msg.Recipient == "" || msg.Content == "" {
+				log.Printf("Invalid message: recipient or content is empty")
+				if err := conn.WriteJSON(Message{
+					Type:    "send_response",
+					Content: "Recipient and content are required",
+				}); err != nil {
+					log.Printf("Failed to write error response: %v", err)
+				}
 				continue
 			}
-			// Send confirmation
-			conn.WriteJSON(Message{
-				Type:    "sent",
-				Content: msg.Content,
-			})
+
+			log.Printf("Sending message to %s: %s", msg.Recipient, msg.Content)
+			if err := s.whatsapp.SendMessage(msg.Recipient, msg.Content); err != nil {
+				log.Printf("Failed to send message: %v", err)
+				if err := conn.WriteJSON(Message{
+					Type:    "send_response",
+					Success: false,
+					Content: fmt.Sprintf("Failed to send message: %v", err),
+				}); err != nil {
+					log.Printf("Failed to write error response: %v", err)
+				}
+			} else {
+				log.Printf("Message sent successfully to %s", msg.Recipient)
+				if err := conn.WriteJSON(Message{
+					Type:    "send_response",
+					Success: true,
+					Content: "Message sent successfully",
+				}); err != nil {
+					log.Printf("Failed to write success response: %v", err)
+				}
+			}
 		}
 	}
 }

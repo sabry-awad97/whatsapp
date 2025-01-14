@@ -13,3 +13,17 @@ type MessageService interface {
 	Receive(message *Message) error
 	HandleIncoming(handler func(*Message))
 }
+
+// MessageHandler defines the interface for handling WhatsApp messages
+type MessageHandler interface {
+	// HandleMessage processes an incoming WhatsApp message
+	HandleMessage(message *Message) error
+}
+
+// MessageReceiver defines the interface for receiving WhatsApp messages
+type MessageReceiver interface {
+	// Receive processes an incoming WhatsApp message
+	Receive(message *Message) error
+	// HandleIncoming sets a handler for incoming messages
+	HandleIncoming(handler func(*Message))
+}

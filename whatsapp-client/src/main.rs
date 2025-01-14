@@ -6,31 +6,39 @@ use qr2term::print_qr;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use url::Url;
 
 #[derive(Debug, Serialize)]
 struct OutgoingMessage {
     #[serde(rename = "type")]
     message_type: String,
-    phone: String,
+    recipient: String,
     content: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum IncomingMessage {
+    #[serde(rename = "connected")]
+    Connected,
+    #[serde(rename = "qr")]
+    QR { code: String },
+    #[serde(rename = "disconnected")]
+    Disconnected,
+    #[serde(rename = "message")]
+    Message {
+        sender: String,
+        content: String,
+        #[serde(default)]
+        message_type: String,
+    },
     #[serde(rename = "send_response")]
     SendResponse {
+        content: String,
+        #[serde(default)]
         success: bool,
-        error: Option<String>,
     },
-    #[serde(rename = "received_message")]
-    ReceivedMessage { from: String, content: String },
-    #[serde(rename = "qr_code")]
-    QRCode { qr_code: String },
-    #[serde(rename = "error")]
-    Error { error: String },
 }
 
 #[derive(Parser, Debug)]
@@ -49,40 +57,48 @@ struct Args {
     message: Option<String>,
 }
 
-async fn handle_incoming_message(text: String) -> Result<()> {
-    match serde_json::from_str::<IncomingMessage>(&text) {
-        Ok(IncomingMessage::SendResponse { success, error }) => {
-            if success {
-                println!("{}", "✅ Message sent successfully!".green());
-            } else {
-                println!(
-                    "{}",
-                    format!("❌ Failed to send message: {}", error.unwrap_or_default()).red()
-                );
-            }
+async fn handle_incoming_message(msg: IncomingMessage) -> Result<()> {
+    match msg {
+        IncomingMessage::Connected => {
+            println!("{}", "✅ Connected to WhatsApp!".green());
         }
-        Ok(IncomingMessage::ReceivedMessage { from, content }) => {
-            println!(
-                "{} {} {}: {}",
-                "📱".green(),
-                "Message from".blue(),
-                from.yellow(),
-                content.white()
-            );
-        }
-        Ok(IncomingMessage::QRCode { qr_code }) => {
+        IncomingMessage::QR { code } => {
             println!(
                 "\n📱 {}",
                 "Scan this QR code with WhatsApp on your phone:".cyan()
             );
-            print_qr(&qr_code).expect("Failed to print QR code");
+            print_qr(&code)?;
             println!("\n⏳ {}", "Waiting for connection...".yellow());
         }
-        Ok(IncomingMessage::Error { error }) => {
-            println!("{}", format!("❌ Server error: {}", error).red());
+        IncomingMessage::Disconnected => {
+            println!("{}", "❌ Disconnected from WhatsApp!".red());
         }
-        Err(e) => {
-            println!("{}", format!("❌ Failed to parse message: {}", e).red());
+        IncomingMessage::Message {
+            sender,
+            content,
+            message_type,
+        } => {
+            let icon = match message_type.as_str() {
+                "image" => "🖼️",
+                "video" => "🎥",
+                "audio" => "🎵",
+                "document" => "📄",
+                "sticker" => "🎨",
+                _ => "📱",
+            };
+            println!(
+                "{} Message from {}: {}",
+                icon,
+                sender.yellow(),
+                content.white()
+            );
+        }
+        IncomingMessage::SendResponse { content, success } => {
+            if success {
+                println!("{} {}", "✅".green(), content.green());
+            } else {
+                println!("{} {}", "❌".red(), content.red());
+            }
         }
     }
     Ok(())
@@ -98,13 +114,16 @@ async fn send_message(
     phone: String,
     content: String,
 ) -> Result<()> {
+    println!("📤 Sending message to {}...", phone.yellow());
     let outgoing = OutgoingMessage {
         message_type: "send_message".to_string(),
-        phone,
+        recipient: phone,
         content,
     };
     let json = serde_json::to_string(&outgoing)?;
+    println!("📨 Message payload: {}", json);
     write.send(Message::Text(json.into())).await?;
+    println!("✈️ Message sent to server, waiting for response...");
     Ok(())
 }
 
@@ -131,7 +150,8 @@ async fn main() -> Result<()> {
             .context("Timeout waiting for response")?;
 
         if let Some(Ok(Message::Text(text))) = response {
-            handle_incoming_message(text.to_string()).await?;
+            let msg: IncomingMessage = serde_json::from_str(&text)?;
+            handle_incoming_message(msg).await?;
         }
         return Ok(());
     }
@@ -141,7 +161,8 @@ async fn main() -> Result<()> {
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => {
-                    if let Err(e) = handle_incoming_message(text.to_string()).await {
+                    let msg: IncomingMessage = serde_json::from_str(&text).unwrap();
+                    if let Err(e) = handle_incoming_message(msg).await {
                         eprintln!("Error handling message: {}", e);
                     }
                 }
@@ -176,9 +197,27 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        if let Err(e) = send_message(&mut write, parts[0].to_string(), parts[1].to_string()).await {
-            println!("{}", format!("Failed to send message: {}", e).red());
-            break;
+        let mut phone = parts[0].to_string();
+        // Remove "@s.whatsapp.net" if present
+        if let Some(idx) = phone.find('@') {
+            phone = phone[..idx].to_string();
+        }
+        // Add "@s.whatsapp.net" if not present
+        if !phone.contains('@') {
+            phone = format!("{}@s.whatsapp.net", phone);
+        }
+
+        let message = parts[1].to_string();
+        println!("📱 Preparing to send message:");
+        println!("   To: {}", phone.yellow());
+        println!("   Content: {}", message.white());
+
+        match send_message(&mut write, phone, message).await {
+            Ok(_) => (),
+            Err(e) => {
+                println!("{}", format!("❌ Failed to send message: {}", e).red());
+                break;
+            }
         }
     }
 
