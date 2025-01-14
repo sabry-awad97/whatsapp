@@ -78,6 +78,18 @@ These are the messages that your client can send to the server.
 }
 ```
 
+#### Send File
+```json
+{
+    "type": "send_file",
+    "recipient": "string",  // Phone number (with or without @s.whatsapp.net)
+    "fileName": "string",   // Name of the file
+    "fileData": "string",   // Base64 encoded file data
+    "fileType": "string",   // MIME type (e.g., "image/jpeg", "application/pdf")
+    "content": "string"     // Optional caption for the file
+}
+```
+
 ## Message Types Reference
 
 | Type | Description |
@@ -88,6 +100,30 @@ These are the messages that your client can send to the server.
 | `audio` | Audio message |
 | `document` | Document with optional title |
 | `sticker` | Sticker message |
+
+## File Type Support
+
+The API supports various file types:
+
+### Images
+- MIME types: image/jpeg, image/png, image/gif
+- Maximum size: 16MB
+- Supported formats: JPG, PNG, GIF
+
+### Videos
+- MIME types: video/mp4, video/3gpp
+- Maximum size: 16MB
+- Supported formats: MP4, 3GP
+
+### Audio
+- MIME types: audio/mp3, audio/ogg, audio/wav
+- Maximum size: 16MB
+- Supported formats: MP3, OGG, WAV
+
+### Documents
+- Various MIME types supported
+- Maximum size: 100MB
+- Common formats: PDF, DOC, DOCX, XLS, XLSX, etc.
 
 ## Example Usage
 
@@ -129,6 +165,47 @@ function sendMessage(phoneNumber, content) {
         content: content
     }));
 }
+
+// Function to send a file
+async function sendFile(phoneNumber, file, caption = '') {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = async function(e) {
+            const base64Data = e.target.result.split(',')[1];
+            const data = {
+                type: 'send_file',
+                recipient: phoneNumber,
+                fileName: file.name,
+                fileData: base64Data,
+                fileType: file.type,
+                content: caption
+            };
+            
+            try {
+                ws.send(JSON.stringify(data));
+                resolve();
+            } catch (error) {
+                reject(error);
+            }
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+// Example usage
+const fileInput = document.querySelector('input[type="file"]');
+fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        try {
+            await sendFile('+1234567890', file, 'Check out this file!');
+            console.log('File sent successfully');
+        } catch (error) {
+            console.error('Failed to send file:', error);
+        }
+    }
+});
 ```
 
 ### Python
@@ -158,7 +235,34 @@ async def connect_whatsapp():
             'content': 'Hello from Python!'
         }))
 
-asyncio.get_event_loop().run_until_complete(connect_whatsapp())
+async def send_file(ws, phone_number, file_path, caption=''):
+    # Read file and get MIME type
+    with open(file_path, 'rb') as f:
+        file_data = f.read()
+    mime_type = mimetypes.guess_type(file_path)[0]
+    
+    # Encode file data
+    base64_data = base64.b64encode(file_data).decode('utf-8')
+    
+    # Create message
+    message = {
+        'type': 'send_file',
+        'recipient': phone_number,
+        'fileName': file_path.split('/')[-1],
+        'fileData': base64_data,
+        'fileType': mime_type,
+        'content': caption
+    }
+    
+    # Send message
+    await ws.send(json.dumps(message))
+
+# Example usage
+async def main():
+    async with websockets.connect('ws://localhost:8080/ws') as ws:
+        await send_file(ws, '+1234567890', 'path/to/file.jpg', 'Check this out!')
+
+asyncio.get_event_loop().run_until_complete(main())
 ```
 
 ### Rust
@@ -225,6 +329,56 @@ async fn connect_whatsapp() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+#[derive(Serialize)]
+struct FileMessage {
+    #[serde(rename = "type")]
+    message_type: String,
+    recipient: String,
+    file_name: String,
+    file_data: String,
+    file_type: String,
+    content: Option<String>,
+}
+
+async fn send_file(
+    ws: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+    phone: &str,
+    file_path: &Path,
+    caption: Option<String>,
+) -> Result<()> {
+    // Read file
+    let mut file = File::open(file_path).await?;
+    let mut buffer = Vec::new();
+    file.read_to_end(&mut buffer).await?;
+    
+    // Get file name and type
+    let file_name = file_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("file")
+        .to_string();
+    
+    let file_type = mime_guess::from_path(file_path)
+        .first_or_octet_stream()
+        .to_string();
+    
+    // Encode file data
+    let file_data = BASE64.encode(&buffer);
+    
+    // Create message
+    let message = FileMessage {
+        message_type: "send_file".to_string(),
+        recipient: phone.to_string(),
+        file_name,
+        file_data,
+        file_type,
+        content: caption,
+    };
+    
+    // Send message
+    ws.send(Message::Text(serde_json::to_string(&message)?)).await?;
+    Ok(())
+}
 ```
 
 ## Error Handling
@@ -265,6 +419,28 @@ Common error scenarios:
    - Use secure WebSocket connections (wss://) in production
    - Validate input data
    - Implement proper authentication if needed
+
+## Best Practices for File Handling
+
+1. **File Size**
+   - Check file size before sending
+   - Consider compressing large files
+   - Split very large files into smaller chunks
+
+2. **File Types**
+   - Verify file type before sending
+   - Use correct MIME types
+   - Handle unsupported file types gracefully
+
+3. **Error Handling**
+   - Handle file read errors
+   - Handle encoding errors
+   - Implement proper timeout handling
+
+4. **Performance**
+   - Use async file operations
+   - Consider implementing progress indicators
+   - Implement retry logic for large files
 
 ## Rate Limiting
 

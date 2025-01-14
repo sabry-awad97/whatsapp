@@ -109,6 +109,29 @@
         background-color: #f0f0f0;
         display: flex;
         gap: 10px;
+        flex-wrap: wrap;
+      }
+      .file-upload {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        width: 100%;
+        margin-bottom: 10px;
+      }
+      .file-info {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        color: #128C7E;
+        font-size: 0.9em;
+      }
+      .file-info i {
+        font-size: 1.2em;
+      }
+      .remove-file {
+        color: #dc3545;
+        cursor: pointer;
+        font-size: 1.2em;
       }
       input[type="text"] {
         flex-grow: 1;
@@ -173,24 +196,33 @@
           <!-- Messages will be added here -->
         </div>
         <div class="input-container">
-          <input
-            type="text"
-            id="phoneNumber"
-            placeholder="Phone number (e.g., +1234567890)"
-          />
+          <div class="file-upload" id="file-upload-container" style="display: none;">
+            <div class="file-info">
+              <i class="fas fa-file"></i>
+              <span id="file-name"></span>
+            </div>
+            <i class="fas fa-times remove-file" onclick="removeFile()"></i>
+          </div>
+          <input type="text" id="phoneNumber" placeholder="Phone number (e.g., +1234567890)" />
           <input type="text" id="message" placeholder="Type a message..." />
+          <input type="file" id="file" style="display: none;" onchange="handleFileSelect(event)" />
+          <button onclick="document.getElementById('file').click()">
+            <i class="fas fa-paperclip"></i>
+          </button>
           <button onclick="sendMessage()">Send</button>
         </div>
       </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.0/build/qrcode.min.js"></script>
+    <script src="https://kit.fontawesome.com/a076d05399.js"></script>
     <script>
       let ws;
       let connected = false;
       let reconnectAttempts = 0;
       const maxReconnectAttempts = 5;
-      const reconnectDelay = 1000; // Start with 1 second
+      const reconnectDelay = 1000;
+      let selectedFile = null;
 
       function connect() {
         if (ws && ws.readyState === WebSocket.CONNECTING) {
@@ -357,36 +389,74 @@
         }
       }
 
-      function sendMessage() {
+      function handleFileSelect(event) {
+        const file = event.target.files[0];
+        if (file) {
+          selectedFile = file;
+          document.getElementById('file-name').textContent = file.name;
+          document.getElementById('file-upload-container').style.display = 'flex';
+        }
+      }
+
+      function removeFile() {
+        selectedFile = null;
+        document.getElementById('file').value = '';
+        document.getElementById('file-upload-container').style.display = 'none';
+      }
+
+      async function sendMessage() {
         if (!connected) {
-          updateStatus("Not connected to WhatsApp");
+          updateStatus('Not connected to WhatsApp');
           return;
         }
-
-        const phoneInput = document.getElementById("phoneNumber");
-        const messageInput = document.getElementById("message");
+        
+        const phoneInput = document.getElementById('phoneNumber');
+        const messageInput = document.getElementById('message');
         const phone = phoneInput.value.trim();
         const message = messageInput.value.trim();
-
-        if (!phone || !message) {
-          updateStatus("Please enter both phone number and message");
+        
+        if (!phone || (!message && !selectedFile)) {
+          updateStatus('Please enter phone number and message or select a file');
           return;
         }
 
-        const data = {
-          type: "send_message",
-          recipient: phone,
-          content: message,
-        };
-
         try {
-          ws.send(JSON.stringify(data));
-          addMessage("You", message, false);
-          messageInput.value = "";
-          updateStatus("Sending message...");
+          if (selectedFile) {
+            // Read file as base64
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+              const base64Data = e.target.result.split(',')[1];
+              const data = {
+                type: 'send_file',
+                recipient: phone,
+                fileName: selectedFile.name,
+                fileData: base64Data,
+                fileType: selectedFile.type,
+                content: message // Optional caption
+              };
+              
+              ws.send(JSON.stringify(data));
+              addMessage('You', `📎 ${selectedFile.name}${message ? ': ' + message : ''}`, false);
+              messageInput.value = '';
+              removeFile();
+              updateStatus('Sending file...');
+            };
+            reader.readAsDataURL(selectedFile);
+          } else {
+            const data = {
+              type: 'send_message',
+              recipient: phone,
+              content: message
+            };
+            
+            ws.send(JSON.stringify(data));
+            addMessage('You', message, false);
+            messageInput.value = '';
+            updateStatus('Sending message...');
+          }
         } catch (error) {
-          console.error("Failed to send message:", error);
-          updateStatus("Failed to send message. Please try again.");
+          console.error('Failed to send:', error);
+          updateStatus('Failed to send. Please try again.');
         }
       }
 
