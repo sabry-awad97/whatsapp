@@ -58,7 +58,7 @@ func main() {
 
 	dbLog := waLog.Stdout("Database", "DEBUG", true)
 	// Modify the connection string to enable foreign keys
-	container, err := sqlstore.New("sqlite", "file:examplestore.db?_pragma=foreign_keys(1)", dbLog)
+	container, err := sqlstore.New("sqlite", "file:example_store.db?_pragma=foreign_keys(1)", dbLog)
 	if err != nil {
 		panic(err)
 	}
