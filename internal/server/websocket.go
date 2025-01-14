@@ -1,109 +1,200 @@
 package server
 
 import (
-	"encoding/json"
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
+
+	"whatsapp/internal/domain"
 
 	"github.com/gorilla/websocket"
-	"whatsapp/internal/domain"
 )
-
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		return true // Allow all origins for development
-	},
-}
 
 type WebSocketServer struct {
 	whatsapp domain.Client
-	clients  map[*websocket.Conn]bool
-	mu       sync.RWMutex
+	upgrader websocket.Upgrader
+	clients  sync.Map
 }
 
 type Message struct {
-	Type    string `json:"type"`
-	Phone   string `json:"phone"`
-	Content string `json:"content"`
+	Type      string `json:"type"`
+	Code      string `json:"code,omitempty"`
+	Recipient string `json:"recipient,omitempty"`
+	Content   string `json:"content,omitempty"`
+	Sender    string `json:"sender,omitempty"`
 }
 
 func NewWebSocketServer(whatsapp domain.Client) *WebSocketServer {
 	return &WebSocketServer{
 		whatsapp: whatsapp,
-		clients:  make(map[*websocket.Conn]bool),
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				return true // Allow all origins in development
+			},
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
+		},
 	}
 }
 
 func (s *WebSocketServer) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
+	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("Failed to upgrade connection: %v", err)
 		return
 	}
-	defer conn.Close()
 
-	s.mu.Lock()
-	s.clients[conn] = true
-	s.mu.Unlock()
+	// Configure WebSocket connection
+	conn.SetReadLimit(512 * 1024) // 512KB
+	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
 
+	// Create a context that will be canceled when the connection closes
+	ctx, cancel := context.WithCancel(r.Context())
 	defer func() {
-		s.mu.Lock()
-		delete(s.clients, conn)
-		s.mu.Unlock()
+		cancel()
+		conn.Close()
 	}()
 
+	// Start ping handler
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(10*time.Second)); err != nil {
+					log.Printf("Failed to write ping: %v", err)
+					return
+				}
+			}
+		}
+	}()
+
+	// Get QR channel
+	qrChan, err := s.whatsapp.GetQRChannel(ctx)
+	if err != nil {
+		log.Printf("Failed to get QR channel: %v", err)
+		conn.WriteJSON(Message{
+			Type:    "error",
+			Content: fmt.Sprintf("Failed to get QR channel: %v", err),
+		})
+		return
+	}
+
+	// Store connection
+	connID := fmt.Sprintf("%p", conn)
+	s.clients.Store(connID, conn)
+	defer s.clients.Delete(connID)
+
+	// Set message handler
+	s.whatsapp.SetMessageHandler(func(msg *domain.Message) {
+		response := Message{
+			Type:    "message",
+			Sender:  msg.Sender,
+			Content: msg.Content,
+		}
+		if err := conn.WriteJSON(response); err != nil {
+			if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("Failed to write message: %v", err)
+			}
+		}
+	})
+
+	// Connect to WhatsApp
+	go func() {
+		log.Println("Starting WhatsApp connection...")
+		if err := s.whatsapp.Connect(ctx); err != nil {
+			if ctx.Err() == nil { // Only log if context wasn't canceled
+				log.Printf("Failed to connect WhatsApp: %v", err)
+				conn.WriteJSON(Message{
+					Type:    "error",
+					Content: fmt.Sprintf("Failed to connect: %v", err),
+				})
+			}
+			return
+		}
+		log.Println("WhatsApp connection established")
+
+		// Send connected message
+		conn.WriteJSON(Message{
+			Type: "connected",
+		})
+	}()
+
+	// Handle QR codes
+	go func() {
+		log.Println("Starting QR code handler...")
+		for {
+			select {
+			case <-ctx.Done():
+				log.Println("QR code handler stopped: context canceled")
+				return
+			case code, ok := <-qrChan:
+				if !ok {
+					log.Println("QR channel closed")
+					return
+				}
+				log.Println("Received QR code, sending to client...")
+				log.Printf("QR code length: %d", len(code))
+				log.Printf("First 50 chars of QR code: %s", code[:min(50, len(code))])
+				response := Message{
+					Type: "qr",
+					Code: code,
+				}
+				if err := conn.WriteJSON(response); err != nil {
+					if !websocket.IsCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+						log.Printf("Failed to write QR code: %v", err)
+					}
+					return
+				}
+				log.Println("QR code sent to client successfully")
+			}
+		}
+	}()
+
+	// Handle incoming messages
 	for {
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket error: %v", err)
+		var msg Message
+		if err := conn.ReadJSON(&msg); err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("Unexpected close error: %v", err)
 			}
 			break
 		}
 
-		var message Message
-		if err := json.Unmarshal(msg, &message); err != nil {
-			log.Printf("Failed to unmarshal message: %v", err)
-			continue
-		}
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
-		switch message.Type {
-		case "send_message":
-			err := s.whatsapp.SendMessage(message.Phone, message.Content)
-			response := map[string]interface{}{
-				"type": "send_response",
-				"success": err == nil,
+		switch msg.Type {
+		case "message":
+			if err := s.whatsapp.SendMessage(msg.Recipient, msg.Content); err != nil {
+				log.Printf("Failed to send message: %v", err)
+				conn.WriteJSON(Message{
+					Type:    "error",
+					Content: fmt.Sprintf("Failed to send message: %v", err),
+				})
+				continue
 			}
-			if err != nil {
-				response["error"] = err.Error()
-			}
-			
-			responseJSON, _ := json.Marshal(response)
-			if err := conn.WriteMessage(websocket.TextMessage, responseJSON); err != nil {
-				log.Printf("Failed to send response: %v", err)
-			}
+			// Send confirmation
+			conn.WriteJSON(Message{
+				Type:    "sent",
+				Content: msg.Content,
+			})
 		}
 	}
 }
 
-func (s *WebSocketServer) BroadcastIncomingMessage(msg *domain.Message) {
-	response := map[string]interface{}{
-		"type":    "received_message",
-		"from":    msg.Sender,
-		"content": msg.Content,
+func min(a, b int) int {
+	if a < b {
+		return a
 	}
-	
-	responseJSON, _ := json.Marshal(response)
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	for client := range s.clients {
-		if err := client.WriteMessage(websocket.TextMessage, responseJSON); err != nil {
-			log.Printf("Failed to broadcast message: %v", err)
-		}
-	}
+	return b
 }

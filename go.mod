@@ -4,7 +4,7 @@ go 1.23.2
 
 require (
 	github.com/gorilla/websocket v1.5.0
-	github.com/mattn/go-sqlite3 v1.14.23
+	github.com/mattn/go-sqlite3 v1.14.24
 	github.com/mdp/qrterminal/v3 v3.2.0
 	go.mau.fi/whatsmeow v0.0.0-20241008165000-6ba2d6ce80c2
 	google.golang.org/protobuf v1.34.2

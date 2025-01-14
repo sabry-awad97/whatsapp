@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Web Client</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f2f5;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #128C7E;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .qr-container {
+            text-align: center;
+            margin: 20px auto;
+            padding: 20px;
+            border: 2px dashed #ddd;
+            border-radius: 10px;
+            max-width: 300px;
+            background-color: white;
+        }
+        #qrcode {
+            margin: 0 auto;
+            padding: 10px;
+            background-color: white;
+        }
+        .qr-code-img {
+            max-width: 256px;
+            width: 100%;
+            height: auto;
+            margin: 0 auto;
+            display: block;
+        }
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            padding: 10px;
+            border-radius: 5px;
+            background-color: #f8f9fa;
+            font-weight: bold;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .status.connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .chat {
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            overflow: hidden;
+            display: none;
+        }
+        .chat.visible {
+            display: block;
+        }
+        .chat-header {
+            background-color: #128C7E;
+            color: white;
+            padding: 15px;
+        }
+        .messages {
+            height: 300px;
+            overflow-y: auto;
+            padding: 15px;
+            background-color: #e5ddd5;
+        }
+        .message {
+            margin: 10px 0;
+            padding: 10px;
+            border-radius: 10px;
+            max-width: 70%;
+            word-wrap: break-word;
+        }
+        .message.received {
+            background-color: white;
+            float: left;
+            clear: both;
+        }
+        .message.sent {
+            background-color: #dcf8c6;
+            float: right;
+            clear: both;
+        }
+        .input-container {
+            padding: 15px;
+            background-color: #f0f0f0;
+            display: flex;
+            gap: 10px;
+        }
+        input[type="text"] {
+            flex-grow: 1;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 20px;
+            outline: none;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #128C7E;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #075E54;
+        }
+        .clearfix::after {
+            content: "";
+            clear: both;
+            display: table;
+        }
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #128C7E;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WhatsApp Web Client</h1>
+        
+        <div class="qr-container" id="qr-container">
+            <div id="qrcode">
+                <div class="loading"></div>
+                <p>Waiting for QR code...</p>
+            </div>
+        </div>
+
+        <div class="status" id="status">
+            Status: Connecting...
+        </div>
+
+        <div class="chat" id="chat">
+            <div class="chat-header">
+                Chat
+            </div>
+            <div class="messages" id="messages">
+                <!-- Messages will be added here -->
+            </div>
+            <div class="input-container">
+                <input type="text" id="phoneNumber" placeholder="Phone number (e.g., +1234567890)" />
+                <input type="text" id="message" placeholder="Type a message..." />
+                <button onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.0/build/qrcode.min.js"></script>
+    <script>
+        let ws;
+        let connected = false;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+        const reconnectDelay = 1000; // Start with 1 second
+
+        function connect() {
+            if (ws && ws.readyState === WebSocket.CONNECTING) {
+                return; // Already trying to connect
+            }
+
+            ws = new WebSocket('ws://' + window.location.host + '/ws');
+            
+            ws.onopen = function() {
+                console.log('Connected to WebSocket');
+                updateStatus('Connected to server');
+                reconnectAttempts = 0; // Reset reconnect attempts on successful connection
+            };
+            
+            ws.onmessage = function(e) {
+                const data = JSON.parse(e.data);
+                console.log('Received:', data);
+                
+                switch(data.type) {
+                    case 'qr':
+                        showQRCode(data.code);
+                        updateStatus('Please scan QR code with your phone');
+                        document.getElementById('qr-container').style.display = 'block';
+                        document.getElementById('chat').classList.remove('visible');
+                        break;
+                    case 'message':
+                        addMessage(data.sender, data.content, true);
+                        updateStatus('Message received');
+                        break;
+                    case 'connected':
+                        connected = true;
+                        updateStatus('Connected to WhatsApp');
+                        document.getElementById('qr-container').style.display = 'none';
+                        document.getElementById('chat').classList.add('visible');
+                        break;
+                    case 'error':
+                        updateStatus('Error: ' + data.content);
+                        break;
+                    case 'sent':
+                        updateStatus('Message sent successfully');
+                        break;
+                }
+            };
+            
+            ws.onclose = function(e) {
+                console.log('WebSocket closed:', e);
+                connected = false;
+                updateStatus('Disconnected');
+                document.getElementById('chat').classList.remove('visible');
+
+                // Attempt to reconnect with exponential backoff
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                    updateStatus(`Reconnecting in ${delay/1000} seconds...`);
+                    setTimeout(() => {
+                        reconnectAttempts++;
+                        connect();
+                    }, delay);
+                } else {
+                    updateStatus('Failed to reconnect. Please refresh the page.');
+                }
+            };
+
+            ws.onerror = function(e) {
+                console.error('WebSocket error:', e);
+                updateStatus('Connection error');
+            };
+        }
+
+        function showQRCode(code) {
+            const qrContainer = document.getElementById('qrcode');
+            qrContainer.innerHTML = ''; // Clear previous content
+            console.log('Generating QR code with data:', code);
+
+            // Format the QR code data for WhatsApp
+            let qrData;
+            try {
+                // Check if it's a WhatsApp connection string
+                if (code.includes('@')) {
+                    qrData = code;
+                } else {
+                    qrData = code;
+                }
+                console.log('Using QR data:', qrData);
+
+                // Create an image element
+                const img = document.createElement('img');
+                img.className = 'qr-code-img';
+
+                // Generate QR code as data URL
+                QRCode.toDataURL(qrData, {
+                    width: 256,
+                    margin: 4,
+                    color: {
+                        dark: '#000000',
+                        light: '#ffffff'
+                    },
+                    errorCorrectionLevel: 'L'
+                })
+                .then(url => {
+                    img.src = url;
+                    qrContainer.appendChild(img);
+                    console.log('QR code generated successfully');
+                })
+                .catch(err => {
+                    console.error('Error generating QR code:', err);
+                    qrContainer.innerHTML = `
+                        <p style="color: red;">Error generating QR code</p>
+                        <p>Error: ${err.message}</p>
+                    `;
+                });
+            } catch (error) {
+                console.error('Failed to process QR code:', error);
+                qrContainer.innerHTML = `
+                    <p style="color: red;">Error processing QR code</p>
+                    <p>Error: ${error.message}</p>
+                `;
+            }
+        }
+
+        function updateStatus(status) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = 'Status: ' + status;
+            statusEl.className = 'status ' + 
+                (status.includes('Error') ? 'error' : 
+                 status.includes('Connected to WhatsApp') ? 'connected' : 
+                 status.includes('Disconnected') ? 'disconnected' : '');
+        }
+
+        function addMessage(sender, content, received) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message ' + (received ? 'received' : 'sent') + ' clearfix';
+            messageDiv.textContent = (received ? sender + ': ' : '') + content;
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        function sendMessage() {
+            if (!connected) {
+                updateStatus('Not connected to WhatsApp');
+                return;
+            }
+            
+            const phoneInput = document.getElementById('phoneNumber');
+            const messageInput = document.getElementById('message');
+            const phone = phoneInput.value.trim();
+            const message = messageInput.value.trim();
+            
+            if (!phone || !message) {
+                updateStatus('Please enter both phone number and message');
+                return;
+            }
+            
+            const data = {
+                type: 'message',
+                recipient: phone,
+                content: message
+            };
+            
+            try {
+                ws.send(JSON.stringify(data));
+                addMessage('You', message, false);
+                messageInput.value = '';
+                updateStatus('Sending message...');
+            } catch (error) {
+                console.error('Failed to send message:', error);
+                updateStatus('Failed to send message. Please try again.');
+            }
+        }
+
+        // Connect when page loads
+        connect();
+
+        // Add enter key handler for message input
+        document.getElementById('message').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>

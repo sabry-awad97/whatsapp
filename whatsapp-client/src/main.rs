@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use colored::*;
 use futures_util::{SinkExt, StreamExt};
+use qr2term::print_qr;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use url::Url;
@@ -25,6 +27,10 @@ enum IncomingMessage {
     },
     #[serde(rename = "received_message")]
     ReceivedMessage { from: String, content: String },
+    #[serde(rename = "qr_code")]
+    QRCode { qr_code: String },
+    #[serde(rename = "error")]
+    Error { error: String },
 }
 
 #[derive(Parser, Debug)]
@@ -43,6 +49,65 @@ struct Args {
     message: Option<String>,
 }
 
+async fn handle_incoming_message(text: String) -> Result<()> {
+    match serde_json::from_str::<IncomingMessage>(&text) {
+        Ok(IncomingMessage::SendResponse { success, error }) => {
+            if success {
+                println!("{}", "✅ Message sent successfully!".green());
+            } else {
+                println!(
+                    "{}",
+                    format!("❌ Failed to send message: {}", error.unwrap_or_default()).red()
+                );
+            }
+        }
+        Ok(IncomingMessage::ReceivedMessage { from, content }) => {
+            println!(
+                "{} {} {}: {}",
+                "📱".green(),
+                "Message from".blue(),
+                from.yellow(),
+                content.white()
+            );
+        }
+        Ok(IncomingMessage::QRCode { qr_code }) => {
+            println!(
+                "\n📱 {}",
+                "Scan this QR code with WhatsApp on your phone:".cyan()
+            );
+            print_qr(&qr_code).expect("Failed to print QR code");
+            println!("\n⏳ {}", "Waiting for connection...".yellow());
+        }
+        Ok(IncomingMessage::Error { error }) => {
+            println!("{}", format!("❌ Server error: {}", error).red());
+        }
+        Err(e) => {
+            println!("{}", format!("❌ Failed to parse message: {}", e).red());
+        }
+    }
+    Ok(())
+}
+
+async fn send_message(
+    write: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Message,
+    >,
+    phone: String,
+    content: String,
+) -> Result<()> {
+    let outgoing = OutgoingMessage {
+        message_type: "send_message".to_string(),
+        phone,
+        content,
+    };
+    let json = serde_json::to_string(&outgoing)?;
+    write.send(Message::Text(json.into())).await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
@@ -58,30 +123,15 @@ async fn main() -> Result<()> {
 
     // If phone and message are provided as arguments, send them immediately
     if let (Some(phone), Some(msg)) = (args.phone, args.message) {
-        let outgoing = OutgoingMessage {
-            message_type: "send_message".to_string(),
-            phone,
-            content: msg,
-        };
-        let json = serde_json::to_string(&outgoing)?;
-        write.send(Message::Text(json.into())).await?;
+        send_message(&mut write, phone, msg).await?;
 
-        // Wait for response
-        if let Some(Ok(Message::Text(text))) = read.next().await {
-            match serde_json::from_str::<IncomingMessage>(&text) {
-                Ok(IncomingMessage::SendResponse { success, error }) => {
-                    if success {
-                        println!("{}", "✅ Message sent successfully!".green());
-                    } else {
-                        println!(
-                            "{}",
-                            format!("❌ Failed to send message: {}", error.unwrap_or_default())
-                                .red()
-                        );
-                    }
-                }
-                _ => println!("{}", "Unexpected response from server".red()),
-            }
+        // Wait for response with timeout
+        let response = tokio::time::timeout(Duration::from_secs(10), read.next())
+            .await
+            .context("Timeout waiting for response")?;
+
+        if let Some(Ok(Message::Text(text))) = response {
+            handle_incoming_message(text.to_string()).await?;
         }
         return Ok(());
     }
@@ -90,29 +140,11 @@ async fn main() -> Result<()> {
     let receive_task = tokio::spawn(async move {
         while let Some(msg) = read.next().await {
             match msg {
-                Ok(Message::Text(text)) => match serde_json::from_str::<IncomingMessage>(&text) {
-                    Ok(IncomingMessage::SendResponse { success, error }) => {
-                        if success {
-                            println!("{}", "✅ Message sent successfully!".green());
-                        } else {
-                            println!(
-                                "{}",
-                                format!("❌ Failed to send message: {}", error.unwrap_or_default())
-                                    .red()
-                            );
-                        }
+                Ok(Message::Text(text)) => {
+                    if let Err(e) = handle_incoming_message(text.to_string()).await {
+                        eprintln!("Error handling message: {}", e);
                     }
-                    Ok(IncomingMessage::ReceivedMessage { from, content }) => {
-                        println!(
-                            "{} {} {}: {}",
-                            "📱".green(),
-                            "Message from".blue(),
-                            from.yellow(),
-                            content.white()
-                        );
-                    }
-                    Err(e) => eprintln!("Error parsing message: {}", e),
-                },
+                }
                 Ok(Message::Close(_)) => {
                     println!("{}", "Connection closed by server".red());
                     break;
@@ -144,14 +176,10 @@ async fn main() -> Result<()> {
             continue;
         }
 
-        let outgoing = OutgoingMessage {
-            message_type: "send_message".to_string(),
-            phone: parts[0].to_string(),
-            content: parts[1].to_string(),
-        };
-
-        let json = serde_json::to_string(&outgoing)?;
-        write.send(Message::Text(json.into())).await?;
+        if let Err(e) = send_message(&mut write, parts[0].to_string(), parts[1].to_string()).await {
+            println!("{}", format!("Failed to send message: {}", e).red());
+            break;
+        }
     }
 
     receive_task.abort();
